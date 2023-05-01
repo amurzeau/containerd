@@ -154,6 +154,7 @@ type gcScheduler struct {
 
 	waiterL sync.Mutex
 	waiters []chan gc.Stats
+	doSleep bool
 
 	pauseThreshold    float64
 	deletionThreshold int
@@ -173,6 +174,7 @@ func newScheduler(c collector, cfg *config) *gcScheduler {
 		mutationThreshold: cfg.MutationThreshold,
 		scheduleDelay:     time.Duration(cfg.ScheduleDelay),
 		startupDelay:      time.Duration(cfg.StartupDelay),
+		doSleep:           false,
 	}
 
 	if s.pauseThreshold < 0.0 {
@@ -197,7 +199,10 @@ func newScheduler(c collector, cfg *config) *gcScheduler {
 }
 
 func (s *gcScheduler) ScheduleAndWait(ctx context.Context) (gc.Stats, error) {
-	return s.wait(ctx, true)
+	s.doSleep = true
+	stats, err := s.wait(ctx, true)
+	s.doSleep = false
+	return stats, err
 }
 
 func (s *gcScheduler) wait(ctx context.Context, trigger bool) (gc.Stats, error) {
@@ -235,6 +240,7 @@ func (s *gcScheduler) mutationCallback(dirty bool) {
 		mutation: true,
 		dirty:    dirty,
 	}
+	log.L.Debugf("garbage collection trigger: %+v", e)
 	go func() {
 		s.eventC <- e
 	}()
@@ -276,6 +282,7 @@ func (s *gcScheduler) run(ctx context.Context) {
 			}
 		case e := <-s.eventC:
 			if lastCollection != nil && lastCollection.After(e.ts) {
+				log.G(ctx).Debugf("garbage collection trigger ignored: %+v", e)
 				continue
 			}
 			if e.dirty {
@@ -305,9 +312,10 @@ func (s *gcScheduler) run(ctx context.Context) {
 		}
 
 		s.waiterL.Lock()
-
+		log.G(ctx).Debugf("contentstore: doing garbage collection, last updated")
 		stats, err := s.c.GarbageCollect(ctx)
 		last := time.Now()
+		log.G(ctx).Debugf("contentstore: done garbage collection, last updated")
 		if err != nil {
 			log.G(ctx).WithError(err).Error("garbage collection failed")
 			collectionCounter.WithValues("fail").Inc()
@@ -354,5 +362,6 @@ func (s *gcScheduler) run(ctx context.Context) {
 		}
 		s.waiters = nil
 		s.waiterL.Unlock()
+		log.G(ctx).Debugf("contentstore: garbage collection completed")
 	}
 }
